@@ -104,7 +104,88 @@ def test_login_expired(monkeypatch: pytest.MonkeyPatch):
         mock_launch.assert_called_once_with("https://verify.uri")
         mock_save.assert_not_called()
         assert "Time for authentication has expired." in result.stdout
-        assert result.exit_code == 0
+        # a login that produced no token is a failure, so wrappers can detect it
+        assert result.exit_code == 1
+
+
+def _device_auth_mock():
+    device_auth_mock = MagicMock()
+    device_auth_mock.verificationUriComplete = "verify.uri"
+    device_auth_mock.deviceCode = "device123"
+    device_auth_mock.expiresIn = 60
+    device_auth_mock.interval = 1
+    return device_auth_mock
+
+
+def _run_login_with(monkeypatch: pytest.MonkeyPatch, side_effect):
+    monkeypatch.setattr(
+        "tiddl.cli.commands.auth.load_auth_data", lambda: AuthData(token=None)
+    )
+
+    with (
+        patch("tiddl.cli.commands.auth.AuthAPI") as MockAuthAPI,
+        patch("tiddl.cli.commands.auth.typer.launch"),
+        patch("tiddl.cli.commands.auth.save_auth_data") as mock_save,
+        patch("tiddl.cli.commands.auth.time", side_effect=lambda: 1000),
+        patch("tiddl.cli.commands.auth.sleep") as mock_sleep,
+    ):
+        auth_api = MockAuthAPI.return_value
+        auth_api.get_device_auth.return_value = _device_auth_mock()
+        auth_api.get_auth.side_effect = side_effect
+
+        result = runner.invoke(auth_command, ["login"])
+
+        return result, mock_save, mock_sleep
+
+
+def test_login_unknown_error_exits(monkeypatch: pytest.MonkeyPatch):
+    """An unrecognised auth error must report and exit, not spin silently."""
+
+    result, mock_save, _ = _run_login_with(
+        monkeypatch, [AuthClientError(error="invalid_client", status=401)]
+    )
+
+    mock_save.assert_not_called()
+    assert "Authentication failed" in result.stdout
+    assert "invalid_client" in result.stdout
+    assert result.exit_code == 1
+
+
+def test_login_access_denied_exits(monkeypatch: pytest.MonkeyPatch):
+    """Denying the device in the browser must end the login."""
+
+    result, mock_save, _ = _run_login_with(
+        monkeypatch, [AuthClientError(error="access_denied")]
+    )
+
+    mock_save.assert_not_called()
+    assert "denied" in result.stdout
+    assert result.exit_code == 1
+
+
+def test_login_slow_down_backs_off(monkeypatch: pytest.MonkeyPatch):
+    """`slow_down` must widen the poll interval and keep polling."""
+
+    auth_mock = MagicMock()
+    auth_mock.access_token = "newtoken"
+    auth_mock.refresh_token = "refreshtoken"
+    auth_mock.expires_in = 3600
+    auth_mock.user_id = 123
+    auth_mock.user.countryCode = "US"
+
+    result, mock_save, mock_sleep = _run_login_with(
+        monkeypatch,
+        [
+            AuthClientError(error="slow_down"),
+            AuthClientError(error="slow_down"),
+            auth_mock,
+        ],
+    )
+
+    mock_save.assert_called_once()
+    assert result.exit_code == 0
+    # interval starts at 1 and grows by 5 on each slow_down
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [1, 6, 11]
 
 
 def test_logout_with_token(monkeypatch: pytest.MonkeyPatch):

@@ -1,5 +1,6 @@
 import typer
 from datetime import datetime
+from logging import getLogger
 from time import time, sleep
 from rich.console import Console
 
@@ -9,6 +10,7 @@ from tiddl.core.auth import AuthAPI, AuthClientError
 from typing_extensions import Annotated
 
 console = Console()
+log = getLogger(__name__)
 
 auth_command = typer.Typer(
     name="auth", help="Manage Tidal authentication.", no_args_is_help=True
@@ -45,9 +47,22 @@ def login(
 
     status_text = "Authenticating..."
 
+    # RFC 8628 device flow: the server may ask us to poll more slowly, and the
+    # interval has to grow for the whole remaining poll, not just one round.
+    interval = device_auth.interval
+    SLOW_DOWN_INCREMENT = 5
+
     with console.status(status_text) as status:
         while True:
-            sleep(device_auth.interval)
+            if time() >= auth_end_at:
+                # never trust the server to tell us we ran out of time; without
+                # this the loop polls a dead device code forever
+                status.console.print(
+                    "\n[bold red]Time for authentication has expired."
+                )
+                raise typer.Exit(code=1)
+
+            sleep(interval)
 
             try:
                 auth = auth_api.get_auth(device_auth.deviceCode)
@@ -71,11 +86,28 @@ def login(
                     )
                     continue
 
+                if e.error == "slow_down":
+                    interval += SLOW_DOWN_INCREMENT
+                    log.debug(f"slow_down received, polling every {interval}s")
+                    status.update(f"{status_text} (slowed to {interval}s)")
+                    continue
+
                 if e.error == "expired_token":
                     status.console.print(
                         "\n[bold red]Time for authentication has expired."
                     )
-                    break
+                    raise typer.Exit(code=1)
+
+                if e.error == "access_denied":
+                    status.console.print(
+                        "\n[bold red]Authentication was denied in the browser."
+                    )
+                    raise typer.Exit(code=1)
+
+                # anything else used to fall through and spin this loop in
+                # silence until the user gave up (upstream #438)
+                status.console.print(f"\n[bold red]Authentication failed: {e}")
+                raise typer.Exit(code=1)
 
 
 @auth_command.command(help="Logout and remove token from app.")

@@ -67,10 +67,26 @@ class AuthClient:
             auth=(self.client_id, self.client_secret),
         )
 
-        json_data = res.json()
+        try:
+            json_data = res.json()
+        except ValueError:
+            # a non-JSON body (gateway error page, empty 5xx) must still surface
+            # as an auth error rather than a bare JSONDecodeError
+            raise AuthClientError(
+                status=res.status_code,
+                error="invalid_response",
+                error_description=res.text[:200] or "non-JSON response from Tidal",
+            )
 
         if res.status_code != 200:
-            raise AuthClientError(**json_data)
+            if isinstance(json_data, dict):
+                raise AuthClientError(**json_data)
+
+            raise AuthClientError(
+                status=res.status_code,
+                error="invalid_response",
+                error_description=str(json_data)[:200],
+            )
 
         return json_data
 

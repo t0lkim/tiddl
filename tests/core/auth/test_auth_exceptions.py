@@ -39,3 +39,23 @@ def test_auth_client_error_string():
     e = AuthClientError(**data)
 
     assert str(e) == f"{e.error}, {e.error_description}, {e.status}/{e.sub_status}"
+
+
+def test_error_keeps_unknown_keys():
+    """An unexpected key in Tidal's error body must not raise TypeError."""
+
+    error = AuthClientError(
+        status=401, error="invalid_client", newField="unexpected"
+    )
+
+    assert error.error == "invalid_client"
+    assert error.extra == {"newField": "unexpected"}
+
+
+def test_error_is_a_normal_exception_with_message():
+    """The error string must survive being raised and caught."""
+
+    try:
+        raise AuthClientError(status=400, error="slow_down")
+    except AuthClientError as caught:
+        assert "slow_down" in str(caught)
